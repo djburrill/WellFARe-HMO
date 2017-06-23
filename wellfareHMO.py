@@ -1,4 +1,5 @@
 #!/usr/local/bin/python3
+# coding=utf-8
 
 import argparse
 import sys
@@ -1050,11 +1051,30 @@ class Molecule:
 # Most important function so far: Read Quantum Chemistry output file and construct WellFaRe Molecule from it
 #############################################################################################################
 
-def extractCoordinates(filename, molecule, verbosity=0, distfactor=1.3, bondcutoff=0.45):
+def extractCoordinates(filename, molecule, verbosity=0):
+    '''
+    Read atomic coordinates from file.
+
+    INPUT
+        filename: Name of file containing atomic position data.
+        molecule: molecule class.
+        verbosity: Level of output detail.
+            1: Lowest level of output. Notification of start and stop.
+            2: Notification that geometry is found.
+            3: List atomic geometries.
+
+    OUTPUT
+        Updated molecule class.
+    '''
+
+    # Notify to start
     if verbosity >= 1:
         print("\nSetting up WellFARe molecule: ", molecule.name)
+
+    # Start reading file
     f = open(filename, 'r')
     program = "N/A"
+
     # Determine which QM program we're dealing with
     for line in f:
         if line.find("Entering Gaussian System, Link 0=g09") != -1:
@@ -1066,6 +1086,11 @@ def extractCoordinates(filename, molecule, verbosity=0, distfactor=1.3, bondcuto
             if verbosity >= 1:
                 print("Reading Orca output file: ", filename)
             program = "orca"
+            break
+        elif line.find("xyz-file") != -1:
+            if verbosity >= 1:
+                print("Reading XYZ file: ", filename)
+            program = "xyz"
             break
     f.close()
 
@@ -1125,7 +1150,19 @@ def extractCoordinates(filename, molecule, verbosity=0, distfactor=1.3, bondcuto
             molecule.addAtom(Atom(readBuffer[0], float(readBuffer[1]), float(readBuffer[2]), float(readBuffer[3])),
                              verbosity=verbosity)
         f.close()
+    # XYZ file
+    elif (program == 'xyz'):
+        with open(filename,'r') as inFile:
+            # Skip first two rows
+            skipNum = 0
 
+            # Iterate through lines in file
+            for line in inFile:
+                if (skipNum > 1):
+                    line = line.strip().split()
+                    molecule.addAtom(Atom(line[0],float(line[1]),float(line[2]),float(line[3])),verbosity=verbosity)
+
+                skipNum += 1
 
         # End of routine
 
