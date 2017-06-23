@@ -1087,12 +1087,17 @@ def extractCoordinates(filename, molecule, verbosity=0):
                 print("Reading Orca output file: ", filename)
             program = "orca"
             break
-        elif line.find("xyz-file") != -1:
+    f.close()
+
+    # Determine file type by extension
+    if (program == "N/A"):
+        extension = filename.split('.')[-1]
+
+        # XYZ file
+        if (extension.lower() == 'xyz'):
             if verbosity >= 1:
                 print("Reading XYZ file: ", filename)
             program = "xyz"
-            break
-    f.close()
 
     # GEOMETRY READING SECTION
     geom = []
