@@ -5,6 +5,7 @@ import argparse
 import sys
 import time
 from importlib.util import find_spec
+import multiprocessing
 
 from src import wellfareSTO
 
@@ -722,7 +723,7 @@ class Molecule:
         s = s + "\n"
         return s
 
-    def HMOEnergy(self, cartCoordinates, K=1.75, charge=0, verbosity=0):
+    def HMOEnergy(self, cartCoordinates, K=1.75, charge=0, verbosity=0, dyn=4, thr=4):
         """ (Molecule) -> number (extended Hueckel aka Tight Binding energy)
 
           Returns a number containing the molecular energy according to the current extended Hueckel aka Tight Binding
@@ -737,6 +738,10 @@ class Molecule:
             for j in i.basis:
                 for k in range(-1 * j.l, j.l + 1):
                     molbasis.append([atomnum, j.n, j.l, k, j.exp, j.ie])
+
+        NAtom = len(self.atoms)
+        NBasis = len(molbasis)
+        print("Running EHT calculation with %d atoms and %d basis functions." % (len(self.atoms), len(molbasis)))
 
         # Print the atomic basis of the calculation in a pretty way (with symbols instead of pure quantum numbers
         if verbosity >= 2 and verbosity < 3:
@@ -758,22 +763,115 @@ class Molecule:
 
         # Create overlap matrix
         overlap = np.zeros((len(molbasis), len(molbasis)))
+        S_thr = 10.0**(-thr)
+        #Dist_thr = 20.0 # distance-based screening doesn't work well
+        print("Screening overlap matrix elements with threshold %.2e" % S_thr)
+        #print("and distance cutoff %.2f." % Dist_thr) 
+        Nsig = 0
+        NB2 = 0
+        # Calculate distances and combined exponents
+        R = np.zeros((NBasis, NBasis))
+        Sig = []
+        #Xi = np.zeros((NBasis, NBasis))
+        SigPairs = []
+        for i in range(0, NBasis):
+            x1 = self.atoms[molbasis[i][0]].coord[0]
+            y1 = self.atoms[molbasis[i][0]].coord[1]
+            z1 = self.atoms[molbasis[i][0]].coord[2]
+            zeta1 = molbasis[i][4]
+            sig_for_i = []
+            for j in range(i, NBasis):
+                NB2 += 1
+                x2 = self.atoms[molbasis[j][0]].coord[0]
+                y2 = self.atoms[molbasis[j][0]].coord[1]
+                z2 = self.atoms[molbasis[j][0]].coord[2]
+                zeta2 = molbasis[j][4]
+                Dist = np.sqrt((x1-x2)**2 + (y1-y2)**2 + (z1-z2)**2)
+                #if Dist[i,j] > Dist_thr:
+                #    continue
+
+
+                Xi = (zeta1 * zeta2)/(zeta1 + zeta2)
+                
+                # estimate value of overlap and skip calculation if insignificant 
+                estimate = np.exp(-Xi*Dist)
+                if estimate >= S_thr:
+                    SigPairs.append((i,j)) 
+                    R[i,j] = Dist
+                    sig_for_i.append(j)
+            Sig.append(sig_for_i)
+        NB2sig = len(SigPairs)
+        print("Pre-screening reduced function pairs from %d to %d (%.2f%%)." % 
+          (NB2, NB2sig, 100.0*NB2sig/NB2))        
+
+        # for each i, sort j's in order of increasing distance
+        for i in range(len(Sig)):
+            nsig = len(Sig[i])
+            Sig[i] = sorted(Sig[i], key=lambda j: R[i,j])
+            #print(sorted(Sig[i], key=lambda j: R[i,j]))
+            #for j in range(nsig):
+            #    #print("i = ", i, " j =", Sig[i][j])
+            #    print("R[%d,%d] = %10.3f" % (i,Sig[i][j],R[i,Sig[i][j]]))
+
+
         # Calculate overlap matrix elements
-        for i in range(0, len(molbasis)):
-            # Exploit matrix symmetry by only calculating diagonal and upper triangle, then copying elements
-            # to fill the rest
-            for j in range(i, len(molbasis)):
+        print("Calculating overlap matrix with dynamical screening threshold %d." % dyn)
+        step = dyn
+        for i in range(NBasis):
+            #print("*** i = ", i)
+            nsig = len(Sig[i])
+            #print("nsig = ", nsig)
+            Nbatch = int(nsig//step)
+            #print("Nbatch = ", Nbatch)
+            for j_batch in range(0, Nbatch):
+                S_tot = 0.0
+                j_off = j_batch * step
+                #print("j_off = ", j_off)
+
+                for k in range(0, step):
+
+                    #print("k = ", k)
+                    j = Sig[i][j_off + k]
+                    overlap[i][j] = wellfareSTO.SlaterOverlapCartesian(molbasis[i][1], molbasis[i][2], molbasis[i][3],
+                      molbasis[i][4], 
+                      self.atoms[molbasis[i][0]].coord[0],
+                      self.atoms[molbasis[i][0]].coord[1],
+                      self.atoms[molbasis[i][0]].coord[2],
+                      molbasis[j][1],
+                      molbasis[j][2],
+                      molbasis[j][3],
+                      molbasis[j][4], 
+                      self.atoms[molbasis[j][0]].coord[0],
+                      self.atoms[molbasis[j][0]].coord[1],
+                      self.atoms[molbasis[j][0]].coord[2])
+                    S_tot += abs(overlap[i][j])
+
+                #print("S_tot = ", S_tot)
+                if S_tot < S_thr:
+                    break
+
+            for j_off in range(Nbatch*step, nsig):
+                j = Sig[i][j_off]
                 overlap[i][j] = wellfareSTO.SlaterOverlapCartesian(molbasis[i][1], molbasis[i][2], molbasis[i][3],
-                                                                   molbasis[i][4],
-                                                                   self.atoms[molbasis[i][0]].coord[0],
-                                                                   self.atoms[molbasis[i][0]].coord[1],
-                                                                   self.atoms[molbasis[i][0]].coord[2],
-                                                                   molbasis[j][1],
-                                                                   molbasis[j][2], molbasis[j][3], molbasis[j][4],
-                                                                   self.atoms[molbasis[j][0]].coord[0],
-                                                                   self.atoms[molbasis[j][0]].coord[1],
-                                                                   self.atoms[molbasis[j][0]].coord[2])
+                  molbasis[i][4], 
+                  self.atoms[molbasis[i][0]].coord[0],
+                  self.atoms[molbasis[i][0]].coord[1],
+                  self.atoms[molbasis[i][0]].coord[2],
+                  molbasis[j][1],
+                  molbasis[j][2],
+                  molbasis[j][3],
+                  molbasis[j][4], 
+                  self.atoms[molbasis[j][0]].coord[0],
+                  self.atoms[molbasis[j][0]].coord[1],
+                  self.atoms[molbasis[j][0]].coord[2])
+
+        # symmetrize and gather statistics
+        for i in range(NBasis):
+            for j in Sig[i]:
                 overlap[j][i] = overlap[i][j]
+                if abs(overlap[i][j] >= S_thr):
+                    Nsig += 1
+
         if verbosity >= 3:
             # Print routine for the overlap matrix
             print("\nOverlap Matrix")
@@ -808,11 +906,14 @@ class Molecule:
                                                                       qn2symb(molbasis[j - 1][2], molbasis[j - 1][3])) +
                                   s[j][i:i + 65])
                 print("")
-
+        N2 = NBasis * NBasis
+        f_sig = 100.0 * Nsig / float(NB2)
+        print("%d out of %d overlap matrix elements are numerically significant (%.2f%%)." % (Nsig, NB2, f_sig)) 
 
         # Create Hamiltonian matrix
         hamiltonian = np.zeros((len(molbasis), len(molbasis)))
         # Calculate Hamiltonian matrix elements
+        print("Calculating EHT Hamiltonian matrix ...")
         for i in range(0, len(molbasis)):
             # Exploit matrix symmetry by only calculating diagonal and upper triangle, then copying elements
             # to fill the rest
@@ -861,12 +962,17 @@ class Molecule:
 
         # Use SciPy algorithm for generalised eigenvalue problem for symmetric matrices to solve
         # HC = SCE, H and S are our input matrices, E holds the energies and C are the coefficients.
+        print("Diagonalizing ...")
         MOEnergies, MOVectors = scipy.linalg.eigh(hamiltonian, b=overlap)
 
         # Calculate total energy as sum over energies of occupied MOs
         energy = 0.0
         for i in range(0, valence_electrons):
             energy += MOEnergies[i // 2]
+
+        # Print HOMO-LUMO gap
+        Egap = MOEnergies[valence_electrons//2] - MOEnergies[valence_electrons//2 - 1]
+        print("HOMO - LUMO gap:   %10.6e Hartree   %10.6f eV" % (Egap, Egap*27.2114))
 
         # Print MO energies
         if verbosity >= 3:
@@ -1180,12 +1286,14 @@ def extractCoordinates(filename, molecule, verbosity=0):
 
 parser = argparse.ArgumentParser(
     description="WellFAReHMP: Wellington Fast Assessment of Reactions - Hückel MO Theory",
-    epilog="recognised filetypes: g09, orca")
+    epilog="recognised filetypes: g09, orca, xyz")
 parser.add_argument("file", metavar='file', help="input file with structural data",
                     default="molecule.log")
 # parser.add_argument("-t", "--theory", help="type of function to fit spectrum", choices=["eht", "dftb"],
 #                     default="eht")
 parser.add_argument("-v", "--verbosity", help="increase output verbosity", type=int, choices=[0, 1, 2, 3], default=1)
+parser.add_argument("-d", "--dyn", help="threshold for dynamic overlap screening", type=int, default=4)
+parser.add_argument("-t", "--thresh", help="numerical screening threshold", type=int, default=4)
 
 args = parser.parse_args()
 
@@ -1202,6 +1310,6 @@ hmo_mol = Molecule("HMO Molecule")
 extractCoordinates(args.file, hmo_mol, verbosity=args.verbosity)
 hmo_mol.orient()
 
-print("Total HMO Energy: {:> 16.8f}".format(hmo_mol.HMOEnergy([0], verbosity=args.verbosity)))
+print("Total HMO Energy: {:> 16.8f}".format(hmo_mol.HMOEnergy([0], verbosity=args.verbosity, dyn=args.dyn, thr=args.thresh)))
 
 ProgramFooter()
