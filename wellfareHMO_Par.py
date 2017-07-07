@@ -6,11 +6,12 @@ import sys
 import time
 from importlib.util import find_spec
 import multiprocessing as mp
+import os
 
 from src import wellfareSTO
 
 # GLOBAL VARIABLES
-nproc = 1           # Number of processors
+nproc = 1           # Number of processes
 
 def timestamp(s):
     print(s + time.strftime("%Y/%m/%d %X"))
@@ -31,7 +32,7 @@ def ProgramHeader():
     print("    This is free software, and you are welcome to         ")
     print("      redistribute it under certain conditions.           ")
     timestamp('Program started at: ')
-    print("Number of Processors: ", nprocs)
+    print("Number of Processes: ", nprocs)
     print("###########################################################\n")
 
 
@@ -301,6 +302,128 @@ def isInt(s):
     except ValueError:
         return False
 
+def splitList(inList,numParts):
+    '''
+    Split a list into a specified number of parts with similar size.
+    '''
+
+    # Variables
+    partSize = len(inList)/numParts
+    remainder = len(inList) % int(numParts)
+    sizeList = []
+    outList = []
+    tmpIdx = 0
+
+    # Populate size list
+    for index in range(numParts):
+        sizeList.append(int(partSize))
+
+    # Deal with remainders
+    while remainder > 0:
+        sizeList[tmpIdx] += 1
+        remainder -= 1
+        tmpIdx += 1
+
+    # Create output list
+    tmpSize = 0
+    for index,sizeL in enumerate(sizeList):
+            outList.append(inList[tmpSize:tmpSize+sizeL])
+            tmpSize += sizeL
+
+    return outList
+
+def par_Overlap(iVals,jVals,atoms,molbasis,step,S_thr,queue):
+    '''
+    Helper function for parallel overlap calculations.
+
+    INPUT
+        iVals: [i1,i2,...]
+        jvals: [[j1,j2,...],[j1,j3,...],...]
+        step: Value assigned from Dyn keyword.
+        queue: Multiprocessing Queue object.
+
+    OUTPUT
+        Adds index and overlap values to queue.
+    '''
+
+    # Variables
+    overlapVals = []
+    indexVals = []
+
+    for index,i in enumerate(iVals):
+        # Set up batch keywords
+        nsig = len(jVals[index])
+        Nbatch = int(nsig//step)
+
+        # Loop over the j values included in a batch
+        for j_batch in range(0, Nbatch):
+            # Initialize S_tot
+            S_tot = 0.0
+            dynOverlapList = []
+
+            # Determine index of batch offset
+            j_off = j_batch * step
+
+            # Loop over j values in batch
+            for k in range(0, step):
+
+                # Calculate j value
+                j = jVals[index][j_off + k]
+
+                # Calculate overlap values
+                dynOverlapList.append(wellfareSTO.SlaterOverlapCartesian(molbasis[i][1], molbasis[i][2], molbasis[i][3],
+                                   molbasis[i][4],
+                                   atoms[molbasis[i][0]].coord[0],
+                                   atoms[molbasis[i][0]].coord[1],
+                                   atoms[molbasis[i][0]].coord[2],
+                                   molbasis[j][1],
+                                   molbasis[j][2],
+                                   molbasis[j][3],
+                                   molbasis[j][4],
+                                   atoms[molbasis[j][0]].coord[0],
+                                   atoms[molbasis[j][0]].coord[1],
+                                   atoms[molbasis[j][0]].coord[2]))
+
+                # Store index values
+                indexVals.append([i,j])
+
+            # Store overlap values
+            overlapVals += dynOverlapList
+
+            # Calculate S_tot
+            for value in dynOverlapList:
+                S_tot += abs(value)
+
+            # Check dynamic evaluation of batches
+            if S_tot < S_thr:
+                break
+
+        # Check edge cases
+        for j_off in range(Nbatch*step, nsig):
+            # Calculate j value
+            j = jVals[index][j_off]
+
+            # Calculate overlap values
+            overlapVals.append(wellfareSTO.SlaterOverlapCartesian(molbasis[i][1], molbasis[i][2], molbasis[i][3],
+                               molbasis[i][4],
+                               atoms[molbasis[i][0]].coord[0],
+                               atoms[molbasis[i][0]].coord[1],
+                               atoms[molbasis[i][0]].coord[2],
+                               molbasis[j][1],
+                               molbasis[j][2],
+                               molbasis[j][3],
+                               molbasis[j][4],
+                               atoms[molbasis[j][0]].coord[0],
+                               atoms[molbasis[j][0]].coord[1],
+                               atoms[molbasis[j][0]].coord[2]))
+
+            # Store index values
+            indexVals.append([i,j])
+
+    # Add results to queue
+    queue.put([indexVals,overlapVals])
+
+    return True
 
 #############################################################################################################
 # STO (Slater Type Orbital class and class methods to be defined below
@@ -764,7 +887,7 @@ class Molecule:
                     " {: >3}({: >3}) {: >3} {: >3} {: >3}  {:.4f}  {: .5f}".format(self.atoms[i[0]].symbol, i[0], i[1],
                                                                                    i[2], i[3], i[4], i[5]))
 
-        # Create overlap matrix
+        # Apply approximated screening to overlap matrix
         overlap = np.zeros((len(molbasis), len(molbasis)))
         S_thr = 10.0**(-thr)
         #Dist_thr = 20.0 # distance-based screening doesn't work well
@@ -820,95 +943,45 @@ class Molecule:
         # Calculate overlap matrix elements
         print("Calculating overlap matrix with dynamical screening threshold %d." % dyn)
         step = dyn
-        indexList = []
-        for i in range(NBasis):
-            #print("*** i = ", i)
-            nsig = len(Sig[i])
-            #print("nsig = ", nsig)
-            Nbatch = int(nsig//step)
-            #print("Nbatch = ", Nbatch)
-            for j_batch in range(0, Nbatch):
-                S_tot = 0.0
-                j_off = j_batch * step
-                #print("j_off = ", j_off)
+        overlapQueue = mp.Queue()
+        overlapProcList = []
 
-                for k in range(0, step):
+        # Split 'i' list into equal parts based on the number of processors
+        iSplit = splitList(range(NBasis),nprocs)
 
-                    #print("k = ", k)
-                    j = Sig[i][j_off + k]
+        # Create list of significant 'j' values for each 'i'
+        jSplit = []
 
-                    # Add elements to index list
-                    indexList.append((i,j))
+        for index in range(nprocs):
+            tmpList = []
+            for iVal in iSplit[index]:
+                tmpList.append(Sig[iVal])
 
-                    '''
-                    overlap[i][j] = wellfareSTO.SlaterOverlapCartesian(molbasis[i][1], molbasis[i][2], molbasis[i][3],
-                      molbasis[i][4],
-                      self.atoms[molbasis[i][0]].coord[0],
-                      self.atoms[molbasis[i][0]].coord[1],
-                      self.atoms[molbasis[i][0]].coord[2],
-                      molbasis[j][1],
-                      molbasis[j][2],
-                      molbasis[j][3],
-                      molbasis[j][4],
-                      self.atoms[molbasis[j][0]].coord[0],
-                      self.atoms[molbasis[j][0]].coord[1],
-                      self.atoms[molbasis[j][0]].coord[2])
-                    '''
-                    #S_tot += abs(overlap[i][j])
+            # Add to jSplit
+            jSplit.append(tmpList)
 
-                #print("S_tot = ", S_tot)
-                #if S_tot < S_thr:
-                #    break
+        # Set up processes
+        for index,iList in enumerate(iSplit):
+            overlapProcList.append(mp.Process(target=par_Overlap,
+                                              args=(iList,jSplit[index],self.atoms,molbasis,step,S_thr,overlapQueue)))
+            overlapProcList[-1].start()
 
-            for j_off in range(Nbatch*step, nsig):
-                j = Sig[i][j_off]
+        # Gather results from queue
+        outList = []
+        for proc in overlapProcList:
+            outList.append(overlapQueue.get(True))
 
-                # Add elements to index list
-                indexList.append((i,j))
-
-                '''
-                overlap[i][j] = wellfareSTO.SlaterOverlapCartesian(molbasis[i][1], molbasis[i][2], molbasis[i][3],
-                  molbasis[i][4],
-                  self.atoms[molbasis[i][0]].coord[0],
-                  self.atoms[molbasis[i][0]].coord[1],
-                  self.atoms[molbasis[i][0]].coord[2],
-                  molbasis[j][1],
-                  molbasis[j][2],
-                  molbasis[j][3],
-                  molbasis[j][4],
-                  self.atoms[molbasis[j][0]].coord[0],
-                  self.atoms[molbasis[j][0]].coord[1],
-                  self.atoms[molbasis[j][0]].coord[2])
-                '''
-
-        # Set up argList for parallel overlap calculation
-        argList = []
-        for index in indexList:
-            i1 = index[0]
-            j1 = index[1]
-            argList.append((molbasis[i1][1], molbasis[i1][2], molbasis[i1][3],
-                           molbasis[i1][4], self.atoms[molbasis[i1][0]].coord[0],
-                           self.atoms[molbasis[i1][0]].coord[1],
-                           self.atoms[molbasis[i1][0]].coord[2],
-                           molbasis[j1][1], molbasis[j1][2], molbasis[j1][3],
-                           molbasis[j1][4], self.atoms[molbasis[j1][0]].coord[0],
-                           self.atoms[molbasis[j1][0]].coord[1],
-                           self.atoms[molbasis[j1][0]].coord[2]))
-
-        # Parallel overlap calculation
-        overlapList = []
-        with mp.Pool(processes=nprocs) as pool:
-            overlapList = pool.starmap(wellfareSTO.SlaterOverlapCartesian,argList)
+        # Join processes
+        for index,proc in enumerate(overlapProcList):
+            proc.join()
 
         # Populate overlap matrix
-        for index,coord in enumerate(indexList):
-            overlap[coord[0]][coord[1]] = overlapList[index]
+        for index1,proc in enumerate(overlapProcList):
+            for index2,idx in enumerate(outList[index1][0]):
+                overlap[idx[0]][idx[1]] = overlap[idx[1]][idx[0]] = outList[index1][1][index2]
 
-        # symmetrize and gather statistics
-        for i in range(NBasis):
-            for j in Sig[i]:
-                overlap[j][i] = overlap[i][j]
-                if abs(overlap[i][j] >= S_thr):
+                # Count number of significant orbitals
+                if abs(overlap[idx[0]][idx[1]] >= S_thr):
                     Nsig += 1
 
         if verbosity >= 3:
@@ -1333,7 +1406,7 @@ parser.add_argument("file", metavar='file', help="input file with structural dat
 parser.add_argument("-v", "--verbosity", help="increase output verbosity", type=int, choices=[0, 1, 2, 3], default=1)
 parser.add_argument("-d", "--dyn", help="threshold for dynamic overlap screening", type=int, default=4)
 parser.add_argument("-t", "--thresh", help="numerical screening threshold", type=int, default=4)
-parser.add_argument("-n", "--nprocs", help="Number of processors.", type=int, default=1)
+parser.add_argument("-n", "--nprocs", help="Number of processess.", type=int, default=1)
 
 args = parser.parse_args()
 
