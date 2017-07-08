@@ -6,9 +6,24 @@ import sys
 import time
 from importlib.util import find_spec
 import multiprocessing as mp
-import os
 
 from src import wellfareSTO
+
+# Check for numpy, exit immediately if not available
+module_loader = find_spec('numpy')
+found = module_loader is not None
+if not found:
+    ProgramError("Module numpy is required")
+    ProgramAbort()
+import numpy as np
+
+# Check for scipy, exit immediately if not available
+module_loader = find_spec('scipy')
+found = module_loader is not None
+if not found:
+    ProgramError("Module scipy is required")
+    ProgramAbort()
+import scipy.optimize
 
 # GLOBAL VARIABLES
 nproc = 1           # Number of processes
@@ -86,24 +101,6 @@ def ProgramError(errortext=''):
         print("# ", errortext)
     print("###############################################################################")
     return
-
-
-# Check for numpy, exit immediately if not available
-module_loader = find_spec('numpy')
-found = module_loader is not None
-if not found:
-    ProgramError("Module numpy is required")
-    ProgramAbort()
-import numpy as np
-
-# Check for scipy, exit immediately if not available
-module_loader = find_spec('scipy')
-found = module_loader is not None
-if not found:
-    ProgramError("Module scipy is required")
-    ProgramAbort()
-import scipy.optimize
-
 
 #############################################################################################################
 # This section is for the definition of *all* constants and conversion factors
@@ -1075,6 +1072,12 @@ class Molecule:
         # Use SciPy algorithm for generalised eigenvalue problem for symmetric matrices to solve
         # HC = SCE, H and S are our input matrices, E holds the energies and C are the coefficients.
         print("Diagonalizing ...")
+
+        # Memory profile
+        if (args.mem == True):
+            print("Size of Hamiltonian: %.3f" % (asizeof.asizeof(hamiltonian)/1024.0/1024),"megabytes.")
+            print("Size of Overlap: %.3f" % (asizeof.asizeof(overlap)/1024.0/1024),"megabytes.")
+
         MOEnergies, MOVectors = scipy.linalg.eigh(hamiltonian, b=overlap)
 
         # Calculate total energy as sum over energies of occupied MOs
@@ -1407,6 +1410,7 @@ parser.add_argument("-v", "--verbosity", help="increase output verbosity", type=
 parser.add_argument("-d", "--dyn", help="threshold for dynamic overlap screening", type=int, default=4)
 parser.add_argument("-t", "--thresh", help="numerical screening threshold", type=int, default=4)
 parser.add_argument("-n", "--nprocs", help="Number of processess.", type=int, default=1)
+parser.add_argument("-m", "--mem", help="Activate memory profiler.", action='store_true')
 
 args = parser.parse_args()
 
@@ -1418,6 +1422,10 @@ args = parser.parse_args()
 
 # Set number of processors
 nprocs = args.nprocs
+
+# Import memory profiler
+if (args.mem == True):
+    from pympler import asizeof
 
 # Print GPL v3 statement and program header
 ProgramHeader()
