@@ -982,6 +982,9 @@ class Molecule:
                     Nsig += 1
 
         if verbosity >= 3:
+            # Save numpy formatted file
+            np.savetxt('overlap.dat',overlap,header='Overlap')
+
             # Print routine for the overlap matrix
             print("\nOverlap Matrix")
             s = [""] * (len(overlap) + 1)
@@ -1035,6 +1038,9 @@ class Molecule:
                     hamiltonian[i][j] = K * overlap[i][j] * ((molbasis[i][5] + molbasis[j][5]) / 2)
                     hamiltonian[j][i] = hamiltonian[i][j]
         if verbosity >= 3:
+            # Save numpy formatted file
+            np.savetxt('hamiltonian.dat',hamiltonian,header='Hamiltonian')
+
             # Print routine for the Hamiltonian matrix
             print("\nHamiltonian Matrix")
             s = [""] * (len(hamiltonian) + 1)
@@ -1409,7 +1415,7 @@ parser.add_argument("file", metavar='file', help="input file with structural dat
 parser.add_argument("-v", "--verbosity", help="increase output verbosity", type=int, choices=[0, 1, 2, 3], default=1)
 parser.add_argument("-d", "--dyn", help="threshold for dynamic overlap screening", type=int, default=4)
 parser.add_argument("-t", "--thresh", help="numerical screening threshold", type=int, default=4)
-parser.add_argument("-n", "--nprocs", help="Number of processess.", type=int, default=1)
+parser.add_argument("-n", "--nprocs", help="Number of processes.", type=int, default=1)
 parser.add_argument("-m", "--mem", help="Activate memory profiler.", action='store_true')
 
 args = parser.parse_args()
@@ -1420,7 +1426,7 @@ args = parser.parse_args()
 #                                                                             #
 ###############################################################################
 
-# Set number of processors
+# Set number of processes
 nprocs = args.nprocs
 
 # Import memory profiler
